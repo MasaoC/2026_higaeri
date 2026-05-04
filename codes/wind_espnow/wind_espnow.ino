@@ -10,6 +10,7 @@ constexpr float kSampleWindowSec = 0.500f;
 constexpr float kWindSpeedPerPps = 1.0f / 1237.6f;
 constexpr float kWindSpeedOffset = 0.44f;
 constexpr uint32_t kDebugPrintIntervalMs = 1000;
+constexpr uint32_t kEncoderDebounceUs = 50UL;  // 最小パルス間隔81μs(10m/s時)より小さく設定
 
 struct EspNowAirDataPacket {
   uint8_t  deviceId;
@@ -30,6 +31,7 @@ struct SampleSlot {
 };
 
 volatile uint32_t g_totalPulseCount = 0;
+volatile uint32_t g_lastPulseTimeUs = 0;
 volatile SampleSlot g_sampleSlot = {};
 volatile bool g_sampleReady = false;
 uint32_t g_prevPulseCount = 0;
@@ -42,7 +44,11 @@ unsigned long g_lastDebugAt = 0;
 const uint8_t kBroadcastAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 void IRAM_ATTR handleEncoderPulse() {
-  g_totalPulseCount++;
+  const uint32_t now = static_cast<uint32_t>(esp_timer_get_time());
+  if (now - g_lastPulseTimeUs >= kEncoderDebounceUs) {
+    g_totalPulseCount++;
+    g_lastPulseTimeUs = now;
+  }
 }
 
 void onSampleTimer(void* /*arg*/) {
@@ -115,7 +121,7 @@ void setup() {
   pinMode(kStatusLedPin, OUTPUT);
   digitalWrite(kStatusLedPin, LOW);
   pinMode(kEncoderPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(kEncoderPin), handleEncoderPulse, RISING);
+  attachInterrupt(digitalPinToInterrupt(kEncoderPin), handleEncoderPulse, FALLING);
 
   esp_timer_handle_t sampleTimer;
   const esp_timer_create_args_t timerArgs = {

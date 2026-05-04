@@ -42,6 +42,7 @@ struct EspNowAirDataPacket {
   uint16_t windSpeed;
   uint16_t pulseCountMin;
   uint16_t pulseCountMax;
+  uint16_t pulseCountTotal; // 0.5 s 窓の 20 Hz サンプル総パルス数
   uint16_t as5600Primary;
   uint16_t as5600Secondary;
   uint16_t batteryRaw;
@@ -51,6 +52,7 @@ struct EspNowAirDataPacket {
 namespace {
 constexpr const char* kLogFilePath = "/flight_log.csv";
 constexpr unsigned long kLedBlinkIntervalMs = 500;
+constexpr unsigned long kLedFastBlinkIntervalMs = 100;
 
 HardwareSerial MySerial0(0);
 ModbusMaster g_master(MySerial0, kRs485DePin, kModbusRxPin, kModbusTxPin);
@@ -89,40 +91,65 @@ static void initRtc() {
   Wire.beginTransmission(kRtcI2cAddr);
   Wire.write(0x0F);
   if (Wire.endTransmission() != 0 || Wire.requestFrom((uint8_t)kRtcI2cAddr, (uint8_t)1) < 1) {
-    // I2C 通信自体が失敗（RTC 未接続など）
     g_rtcReady = false;
     return;
   }
   const uint8_t statusReg = Wire.read();
   g_rtcReady = true;
 
-  if ((statusReg & 0x80) == 0) {
-    // OSF=0: オシレータは止まっていない → 時刻は有効なのでそのまま使う
-    Serial.println("[logger] RTC time is valid, skipping write");
-    return;
-  }
-
-  // OSF=1: 電源断などで時刻が無効 → コンパイル時刻を書き込む
-  Serial.println("[logger] RTC oscillator stopped, writing compile time");
+  // コンパイル時刻を計算
   const char* months = "JanFebMarAprMayJunJulAugSepOctNovDec";
   char mon[4] = {__DATE__[0], __DATE__[1], __DATE__[2], '\0'};
   const char* found = strstr(months, mon);
-  uint8_t month = found ? static_cast<uint8_t>((found - months) / 3 + 1) : 1;
-  uint8_t day   = (__DATE__[4] == ' ' ? 0 : __DATE__[4] - '0') * 10 + (__DATE__[5] - '0');
-  uint8_t year  = (__DATE__[9] - '0') * 10 + (__DATE__[10] - '0');
-  uint8_t hour  = (__TIME__[0] - '0') * 10 + (__TIME__[1] - '0');
-  uint8_t min_  = (__TIME__[3] - '0') * 10 + (__TIME__[4] - '0');
-  uint8_t sec   = (__TIME__[6] - '0') * 10 + (__TIME__[7] - '0');
+  uint8_t compileMonth = found ? static_cast<uint8_t>((found - months) / 3 + 1) : 1;
+  uint8_t compileDay   = (__DATE__[4] == ' ' ? 0 : __DATE__[4] - '0') * 10 + (__DATE__[5] - '0');
+  uint8_t compileYear  = (__DATE__[9] - '0') * 10 + (__DATE__[10] - '0');
+  uint8_t compileHour  = (__TIME__[0] - '0') * 10 + (__TIME__[1] - '0');
+  uint8_t compileMin   = (__TIME__[3] - '0') * 10 + (__TIME__[4] - '0');
+  uint8_t compileSec   = (__TIME__[6] - '0') * 10 + (__TIME__[7] - '0');
 
+  // コンパイル時刻をシリアル番号に変換（比較用）
+  const uint32_t compileSerial = ((uint32_t)compileYear  * 100000000UL)
+                                + ((uint32_t)compileMonth * 1000000UL)
+                                + ((uint32_t)compileDay   * 10000UL)
+                                + ((uint32_t)compileHour  * 100UL)
+                                + ((uint32_t)compileMin);
+
+  // OSF=0 かつ RTC 時刻がコンパイル時刻以降なら書き込み不要
+  if ((statusReg & 0x80) == 0) {
+    Wire.beginTransmission(kRtcI2cAddr);
+    Wire.write(0x00);
+    if (Wire.endTransmission() == 0 && Wire.requestFrom((uint8_t)kRtcI2cAddr, (uint8_t)7) >= 7) {
+      Wire.read();  // sec（スキップ）
+      Wire.read();  // min（スキップ）
+      Wire.read();  // hour（スキップ）
+      Wire.read();  // 曜日（スキップ）
+      uint8_t rtcDay   = bcdDecode(Wire.read() & 0x3F);
+      uint8_t rtcMonth = bcdDecode(Wire.read() & 0x1F);
+      uint8_t rtcYear  = bcdDecode(Wire.read());
+      const uint32_t rtcSerial = ((uint32_t)rtcYear  * 100000000UL)
+                                + ((uint32_t)rtcMonth * 1000000UL)
+                                + ((uint32_t)rtcDay   * 10000UL);
+      if (rtcSerial >= compileSerial) {
+        Serial.println("[logger] RTC time is valid, skipping write");
+        return;
+      }
+      Serial.println("[logger] RTC time older than compile time, updating");
+    }
+  } else {
+    Serial.println("[logger] RTC oscillator stopped, writing compile time");
+  }
+
+  // RTC に時刻を書き込む
   Wire.beginTransmission(kRtcI2cAddr);
   Wire.write(0x00);
-  Wire.write(bcdEncode(sec));
-  Wire.write(bcdEncode(min_));
-  Wire.write(bcdEncode(hour));
+  Wire.write(bcdEncode(compileSec));
+  Wire.write(bcdEncode(compileMin));
+  Wire.write(bcdEncode(compileHour));
   Wire.write(0x01);              // 曜日（未使用）
-  Wire.write(bcdEncode(day));
-  Wire.write(bcdEncode(month));
-  Wire.write(bcdEncode(year));
+  Wire.write(bcdEncode(compileDay));
+  Wire.write(bcdEncode(compileMonth));
+  Wire.write(bcdEncode(compileYear));
   if (Wire.endTransmission() != 0) {
     g_rtcReady = false;
     return;
@@ -132,7 +159,33 @@ static void initRtc() {
   Wire.beginTransmission(kRtcI2cAddr);
   Wire.write(0x0F);
   Wire.write(statusReg & ~0x80);
-  Wire.endTransmission();
+  if (Wire.endTransmission() != 0) {
+    Serial.println("[logger] RTC OSF clear FAILED");
+    g_rtcReady = false;
+    return;
+  }
+
+  // コントロールレジスタ 0x0E の EOSC ビット(bit7)を 0 にする
+  // EOSC=1 だとバッテリーバックアップ時に発振が停止する
+  Wire.beginTransmission(kRtcI2cAddr);
+  Wire.write(0x0E);
+  if (Wire.endTransmission() != 0 || Wire.requestFrom((uint8_t)kRtcI2cAddr, (uint8_t)1) < 1) {
+    Serial.println("[logger] RTC control reg read FAILED");
+    g_rtcReady = false;
+    return;
+  }
+  const uint8_t ctrlReg = Wire.read();
+  if (ctrlReg & 0x80) {
+    Wire.beginTransmission(kRtcI2cAddr);
+    Wire.write(0x0E);
+    Wire.write(ctrlReg & ~0x80);
+    if (Wire.endTransmission() != 0) {
+      Serial.println("[logger] RTC EOSC clear FAILED");
+      g_rtcReady = false;
+      return;
+    }
+    Serial.println("[logger] RTC EOSC cleared (was set)");
+  }
 }
 
 // "YYYY-MM-DD HH:MM:SS" を取得。失敗時は "BOOT+XXXXXms" にフォールバック
@@ -233,7 +286,7 @@ void initSdCard() {
   if (!SD.exists(kLogFilePath)) {
     File file = SD.open(kLogFilePath, FILE_WRITE);
     if (file) {
-      file.println("timestamp,airspeed,pulse_min,pulse_max,wind_board_airspeed,as5600_1,as5600_2,air_battery,baro_alt,pot1,pot2,display_battery,ultrasonic,roll,pitch,yaw");
+      file.println("timestamp,airspeed,pulse_min,pulse_max,pulse_total,wind_board_airspeed,as5600_1,as5600_2,air_battery,baro_alt,pot1,pot2,display_battery,ultrasonic,roll,pitch,yaw");
       file.close();
     }
   }
@@ -285,18 +338,20 @@ void writeLogRecord() {
   getRtcTimestamp(timestamp, sizeof(timestamp));
 
   const bool airEspNowFresh = (millis() - g_airEspNowLastReceivedAt) < kEspNowStaleMs;
-  const uint16_t airPulseMin = airEspNowFresh ? g_airEspNowLatest.pulseCountMin : 0;
-  const uint16_t airPulseMax = airEspNowFresh ? g_airEspNowLatest.pulseCountMax : 0;
+  const uint16_t airPulseMin   = airEspNowFresh ? g_airEspNowLatest.pulseCountMin   : 0;
+  const uint16_t airPulseMax   = airEspNowFresh ? g_airEspNowLatest.pulseCountMax   : 0;
+  const uint16_t airPulseTotal = airEspNowFresh ? g_airEspNowLatest.pulseCountTotal : 0;
 
-  char record[320];
+  char record[512];
   snprintf(record,
            sizeof(record),
-           "%s,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f,%.2f\n",
+           "%s,%.1f,%u,%u,%u,%.1f,%u,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f,%.2f\n",
            timestamp,
-           g_airDataBuffer[0],
+           g_airDataBuffer[0] / 10.0f,
            airPulseMin,
            airPulseMax,
-           g_windEspNowLatest.windSpeed,
+           airPulseTotal,
+           g_windEspNowLatest.windSpeed / 10.0f,
            g_airDataBuffer[1],
            g_airDataBuffer[2],
            g_airDataBuffer[3],
@@ -325,7 +380,7 @@ void writeLogRecord() {
 
 }  // namespace
 
-void onEspNowReceive(const uint8_t* macAddr, const uint8_t* data, int len) {
+void onEspNowReceive(const esp_now_recv_info_t* /*recvInfo*/, const uint8_t* data, int len) {
   if (len < 1) {
     return;
   }
@@ -340,6 +395,7 @@ void onEspNowReceive(const uint8_t* macAddr, const uint8_t* data, int len) {
       g_airEspNowLatest.windSpeed = legacyPacket->windSpeed;
       g_airEspNowLatest.pulseCountMin = 0;
       g_airEspNowLatest.pulseCountMax = 0;
+      g_airEspNowLatest.pulseCountTotal = 0;
       g_airEspNowLatest.as5600Primary = legacyPacket->as5600Primary;
       g_airEspNowLatest.as5600Secondary = legacyPacket->as5600Secondary;
       g_airEspNowLatest.batteryRaw = legacyPacket->batteryRaw;
@@ -361,7 +417,25 @@ void onEspNowReceive(const uint8_t* macAddr, const uint8_t* data, int len) {
 
 namespace {
 void updateLed() {
-  if (g_lastAirOk && g_lastDisplayOk) {
+  // SDエラー: 点灯
+  if (!g_sdReady) {
+    digitalWrite(kLoggerLedPin, HIGH);
+    return;
+  }
+
+  // Modbus通信中: 早く点滅
+  if (g_lastAirOk) {
+    if (millis() - g_lastLedToggleAt >= kLedFastBlinkIntervalMs) {
+      g_lastLedToggleAt = millis();
+      g_ledState = !g_ledState;
+      digitalWrite(kLoggerLedPin, g_ledState ? HIGH : LOW);
+    }
+    return;
+  }
+
+  // ESP-NOW受信中: 点滅
+  const bool espNowFresh = (millis() - g_airEspNowLastReceivedAt) < kEspNowStaleMs;
+  if (espNowFresh) {
     if (millis() - g_lastLedToggleAt >= kLedBlinkIntervalMs) {
       g_lastLedToggleAt = millis();
       g_ledState = !g_ledState;
@@ -370,7 +444,7 @@ void updateLed() {
     return;
   }
 
-  digitalWrite(kLoggerLedPin, HIGH);
+  digitalWrite(kLoggerLedPin, LOW);
 }
 }
 
@@ -397,7 +471,7 @@ void setup() {
   }
 
   WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  WiFi.setTxPower(WIFI_POWER_21dBm);
   WiFi.disconnect();
   if (esp_now_init() == ESP_OK) {
     esp_now_register_recv_cb(onEspNowReceive);
@@ -419,22 +493,22 @@ void loop() {
   if (millis() - g_lastPollAt >= kLoggerPollIntervalMs) {
     g_lastPollAt = millis();
     pollDevices();
-    writeLogRecord();
     const bool usingFallback = g_modbusConsecutiveFailures >= kModbusFailureThreshold
                               && (millis() - g_airEspNowLastReceivedAt) < kEspNowStaleMs;
     char ts[24];
     getRtcTimestamp(ts, sizeof(ts));
-    Serial.printf("[logger] %s  sd=%s  cycle=%s  src=%s  air=[spd=%u pmin=%u pmax=%u as1=%u as2=%u batt=%u]  wind=[spd=%u seq=%lu]  disp=[baro=%u pot1=%u pot2=%u batt=%u ultra=%u]  imu=[r=%.1f p=%.1f y=%.1f]\n",
+    Serial.printf("[logger] %s  sd=%s  cycle=%s  src=%s  air=[spd=%.1f pmin=%u pmax=%u as1=%u as2=%u batt=%u]  wind=[spd=%.1f seq=%lu]  disp=[baro=%u pot1=%u pot2=%u batt=%u ultra=%u]  imu=[r=%.1f p=%.1f y=%.1f]\n",
       ts,
       g_sdReady ? "OK" : "ERR",
       g_lastCycleOk ? "OK" : "ERR",
       usingFallback ? "ESPNOW" : "RS485",
-      g_airDataBuffer[0], g_airEspNowLatest.pulseCountMin, g_airEspNowLatest.pulseCountMax,
+      g_airDataBuffer[0] / 10.0f, g_airEspNowLatest.pulseCountMin, g_airEspNowLatest.pulseCountMax,
       g_airDataBuffer[1], g_airDataBuffer[2], g_airDataBuffer[3],
-      g_windEspNowLatest.windSpeed, static_cast<unsigned long>(g_windEspNowLatest.sequenceNumber),
+      g_windEspNowLatest.windSpeed / 10.0f, static_cast<unsigned long>(g_windEspNowLatest.sequenceNumber),
       g_displayBuffer[0], g_displayBuffer[1], g_displayBuffer[2], g_displayBuffer[3], g_displayBuffer[4],
       g_imuData.roll, g_imuData.pitch, g_imuData.yaw);
   }
 
+  writeLogRecord();
   updateLed();
 }

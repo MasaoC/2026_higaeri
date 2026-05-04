@@ -447,7 +447,7 @@ void printDebug() {
 }
 }
 
-void onEspNowReceive(const uint8_t* mac, const uint8_t* data, int len) {
+void onEspNowReceive(const esp_now_recv_info_t* /*recvInfo*/, const uint8_t* data, int len) {
   if (len != static_cast<int>(sizeof(EspNowAirDataPacket))) return;
   const EspNowAirDataPacket* pkt = reinterpret_cast<const EspNowAirDataPacket*>(data);
   if (pkt->deviceId == kAirDataEspNowDeviceId) {
@@ -467,15 +467,17 @@ void setup() {
 
   Wire.begin(6, 7);  // SDA=GPIO6, SCL=GPIO7 (XIAO ESP32C3)
   Wire.setClock(400000);
+  Serial.println("[display_d1] Wire begin OK");
 
   g_dpsReady = g_dps.begin_I2C(kDps310I2CAddress, &Wire);
+  Serial.printf("[display_d1] DPS310 %s\n", g_dpsReady ? "OK" : "FAILED");
   if (g_dpsReady) {
     g_dps.configurePressure(DPS310_64HZ, DPS310_64SAMPLES);
     g_dps.configureTemperature(DPS310_64HZ, DPS310_64SAMPLES);
   }
 
   WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  WiFi.setTxPower(WIFI_POWER_21dBm);
   WiFi.disconnect();
   if (esp_now_init() == ESP_OK) {
     esp_now_register_recv_cb(onEspNowReceive);
@@ -484,14 +486,18 @@ void setup() {
     Serial.println("[display_d1] ESP-NOW init FAILED");
   }
 
-  SPI.begin(kSpiSckPin, kSpiMisoPin, kSpiMosiPin);
   g_tft.init();
+  Serial.println("[display_d1] TFT init OK");
   g_tft.setRotation(0);
   g_tft.fillScreen(kDisplayBackground);
+  Serial.println("[display_d1] TFT fill OK");
   drawGaugeFrame();
+  Serial.println("[display_d1] gauge frame OK");
   createNeedleSprite();
+  Serial.println("[display_d1] needle sprite OK");
 
   g_slave.begin();
+  Serial.println("[display_d1] slave begin OK");
 }
 
 void loop() {
