@@ -85,7 +85,13 @@ void renderDisplay() {
 }
 }
 
+#include <esp_arduino_version.h>
+
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+void onEspNowReceive(const esp_now_recv_info_t* recvInfo, const uint8_t* data, int len) {
+#else
 void onEspNowReceive(const uint8_t* macAddr, const uint8_t* data, int len) {
+#endif
   if (len != sizeof(RangeTestPacket)) {
     return;
   }

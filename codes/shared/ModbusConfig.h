@@ -8,8 +8,8 @@ constexpr uint32_t kModbusBaudRate = 9600;
 constexpr uint32_t kDisplayRefreshIntervalMs = 100;
 constexpr uint32_t kDisplayI2CPollIntervalMs = 200;
 constexpr uint32_t kDisplayD2SensorIntervalMs = 100;
-constexpr uint32_t kLoggerPollIntervalMs = 1000;
-constexpr uint32_t kModbusTimeoutMs = 1000;
+constexpr uint32_t kLoggerPollIntervalMs = 500;
+constexpr uint32_t kModbusTimeoutMs = 100;
 
 constexpr uint8_t kModbusRxPin = 5;
 constexpr uint8_t kModbusTxPin = 4;

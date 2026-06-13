@@ -64,6 +64,19 @@ constexpr float kGaugeMaxSpeed = 10.0f;
 constexpr float kGaugeSafeMinSpeed = 5.5f;
 constexpr float kGaugeSafeMaxSpeed = 8.0f;
 
+// ── Altitude display layout ──
+constexpr int16_t  kAltSepY       = 231;   // 区切り線 Y
+constexpr int16_t  kAltLabelY     = 234;   // "ALT" ラベル Y
+constexpr int16_t  kAltBarX       = 4;     // バー左端 X
+constexpr int16_t  kAltBarY       = 252;   // バー上端 Y
+constexpr int16_t  kAltBarW       = 232;   // バー幅
+constexpr int16_t  kAltBarH       = 18;    // バー高さ
+constexpr int16_t  kAltNumY       = 274;   // 数値上端 Y  (Arial_Black22 ~22px)
+constexpr int16_t  kAltInfoY      = 300;   // ステータス行 Y
+constexpr float    kAltBarMax     = 450.0f; // バー満杯となる距離 [cm] (HC-SR04 最大4.5m)
+constexpr uint16_t kAltBarColor   = TFT_CYAN;
+constexpr uint16_t kAltBarBgColor = 0x2104; // dark gray
+
 struct DisplayD2Snapshot {
   uint16_t potentiometer1;
   uint16_t potentiometer2;
@@ -355,7 +368,48 @@ void updateBarometricAltitude() {
   }
 
   const float altitudeMeters = g_dps.readAltitude(kSeaLevelPressureHpa);
-  g_snapshot.baroAlt = static_cast<uint16_t>(altitudeMeters * 10.0f);
+  g_snapshot.baroAlt = static_cast<uint16_t>(altitudeMeters * 100.0f);
+}
+
+void drawAltitudeSection() {
+  const float altCmRaw = static_cast<float>(g_snapshot.ultrasonicAlt);
+  const float altCm    = altCmRaw > kAltBarMax ? kAltBarMax : altCmRaw;  // 上限クランプ
+  const float fraction = altCm / kAltBarMax;
+  const int16_t fillW = static_cast<int16_t>(fraction * kAltBarW);
+
+  // 区切り線
+  g_tft.drawFastHLine(0, kAltSepY, 240, kGaugeLineColor);
+
+  // "ALT" ラベル
+  g_tft.setTextColor(kGaugeLineColor, kDisplayBackground);
+  g_tft.drawString("ALT", kAltBarX, kAltLabelY, 2);
+
+  // バー: 背景 → 塗り → 枠
+  g_tft.fillRect(kAltBarX, kAltBarY, kAltBarW, kAltBarH, kAltBarBgColor);
+  if (fillW > 0) {
+    g_tft.fillRect(kAltBarX, kAltBarY, fillW, kAltBarH, kAltBarColor);
+  }
+  g_tft.drawRect(kAltBarX - 1, kAltBarY - 1, kAltBarW + 2, kAltBarH + 2, kGaugeLineColor);
+
+  g_slave.task();
+
+  // 高度数値 (Arial_Black22) — 超音波センサ [cm]
+  g_tft.loadFont(Arial_Black22);
+  g_tft.setTextColor(kGaugeLineColor, kDisplayBackground);
+  char altStr[12];
+  snprintf(altStr, sizeof(altStr), "%d cm", static_cast<int>(altCm));
+  g_tft.setTextPadding(g_tft.textWidth("999 cm"));
+  g_tft.drawCentreString(altStr, kGaugeCx, kAltNumY, 1);
+  g_tft.setTextPadding(0);
+  g_tft.unloadFont();
+
+  // 最下段: 信号源・バッテリー
+  char infoStr[30];
+  snprintf(infoStr, sizeof(infoStr), "%-6s  Bt:%-4u",
+           g_useEspNow ? "ESPNOW" : "RS485",
+           g_snapshot.batteryVoltage);
+  g_tft.setTextColor(g_useEspNow ? TFT_GREEN : kGaugeLineColor, kDisplayBackground);
+  g_tft.drawString(infoStr, kAltBarX, kAltInfoY, 2);
 }
 
 void renderDisplay() {
@@ -388,34 +442,7 @@ void renderDisplay() {
 
   g_slave.task();
 
-  // ── Bottom info panel (built-in font 2) ──
-  g_tft.setTextColor(kGaugeLineColor, kDisplayBackground);
-  char line[42];
-  int y = 250;
-
-  snprintf(line, sizeof(line), "B:%-5u Bt:%-5u",
-           g_snapshot.baroAlt, g_snapshot.batteryVoltage);
-  g_tft.drawString(line, 4, y, 2);
-  y += 18;
-
-  snprintf(line, sizeof(line), "P1:%-4u P2:%-4u U:%-4u",
-           g_snapshot.potentiometer1, g_snapshot.potentiometer2, g_snapshot.ultrasonicAlt);
-  g_tft.drawString(line, 4, y, 2);
-  y += 18;
-
-  g_slave.task();
-
-  snprintf(line, sizeof(line), "I2C:%-3s OK:%-5lu E:%-5lu",
-           g_snapshot.connected ? "OK" : "ERR",
-           static_cast<unsigned long>(g_snapshot.successCount),
-           static_cast<unsigned long>(g_snapshot.failureCount));
-  g_tft.setTextColor(g_snapshot.connected ? TFT_GREEN : TFT_RED, kDisplayBackground);
-  g_tft.drawString(line, 4, y, 2);
-  y += 18;
-
-  snprintf(line, sizeof(line), "src:%-6s", g_useEspNow ? "ESPNOW" : "RS485");
-  g_tft.setTextColor(g_useEspNow ? TFT_GREEN : kGaugeLineColor, kDisplayBackground);
-  g_tft.drawString(line, 4, y, 2);
+  drawAltitudeSection();
 
   if (needleChanged) {
     drawNeedleSprite(currentNeedleAngle);

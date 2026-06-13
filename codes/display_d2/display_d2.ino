@@ -41,7 +41,7 @@ DisplayD2Payload g_payload = {0, 0, 0, 0};
 unsigned long g_lastUpdateAt = 0;
 unsigned long g_lastDebugAt = 0;
 unsigned long g_lastRenderAt = 0;
-volatile bool g_rollAlarm = false;
+volatile uint8_t g_rollAlarm = 0;  // 0: OK, 1: L-ALARM, 2: R-ALARM
 bool g_ultrasonicValid = false;
 
 bool readUltrasonicDistance(uint16_t& distanceCm) {
@@ -137,8 +137,16 @@ void renderDisplay() {
   snprintf(line, sizeof(line), "BATT:%4u", g_payload.batteryVoltage);
   g_tft.drawString(line, 8, 118, 2);
 
-  g_tft.setTextColor(g_rollAlarm ? kDisplayWarning : TFT_GREEN, kDisplayBackground);
-  snprintf(line, sizeof(line), "ROLL:%s", g_rollAlarm ? "ALARM" : "OK");
+  if (g_rollAlarm == 1) {
+    g_tft.setTextColor(kDisplayWarning, kDisplayBackground);
+    snprintf(line, sizeof(line), "ROLL: L-ALARM");
+  } else if (g_rollAlarm == 2) {
+    g_tft.setTextColor(kDisplayWarning, kDisplayBackground);
+    snprintf(line, sizeof(line), "ROLL: R-ALARM");
+  } else {
+    g_tft.setTextColor(TFT_GREEN, kDisplayBackground);
+    snprintf(line, sizeof(line), "ROLL: OK");
+  }
   g_tft.drawString(line, 8, 140, 2);
 }
 
@@ -147,19 +155,19 @@ void printDebug() {
     return;
   }
   g_lastDebugAt = millis();
-  Serial.printf("[display_d2] pot1=%u  pot2=%u  batt=%u  ultra=%u  us=%s  roll_alarm=%s\n",
+  Serial.printf("[display_d2] pot1=%u  pot2=%u  batt=%u  ultra=%u  us=%s  roll_alarm=%u\n",
     g_payload.potentiometer1,
     g_payload.potentiometer2,
     g_payload.batteryVoltage,
     g_payload.ultrasonicAlt,
     g_ultrasonicValid ? "OK" : "NG",
-    g_rollAlarm ? "ON" : "OFF");
+    g_rollAlarm);
 }
 }
 
 void onI2CReceive(int len) {
   if (len < 1) return;
-  g_rollAlarm = (Wire.read() != 0);
+  g_rollAlarm = Wire.read();
   while (Wire.available()) Wire.read();  // 余分バイトを捨てる
 }
 
@@ -175,6 +183,14 @@ void setup() {
   pinMode(kPot1Pin, INPUT);
   pinMode(kPot2Pin, INPUT);
   pinMode(kBatteryPin, INPUT);
+
+  // 起動時のメロディー (ド・ミ・ソ、またはピロッといういい感じの音)
+  // 1500Hzを80ms、2000Hzを120msで鳴らして、軽快な「ピロッ♪」という起動音
+  tone(kBuzzerPin, 1500);
+  delay(80);
+  tone(kBuzzerPin, 2000);
+  delay(120);
+  noTone(kBuzzerPin);
 
   Serial0.begin(kUltrasonicBaudRate);  // HC-SR04: D6=RX, D7=TX (ピン指定不要)
 
@@ -195,8 +211,20 @@ void loop() {
   renderDisplay();
   printDebug();
 
-  if (g_rollAlarm) {
-    tone(kBuzzerPin, 1000);
+  if (g_rollAlarm == 1) {
+    // 左ロール警告音: 高く鋭い「ピピピピッ」 (1200Hz 高速断続音: 75ms周期)
+    if ((millis() / 75) % 2 == 0) {
+      tone(kBuzzerPin, 1200);
+    } else {
+      noTone(kBuzzerPin);
+    }
+  } else if (g_rollAlarm == 2) {
+    // 右ロール警告音: 少し低めの「ポー、ポー、ポー」 (800Hz 低速低音断続音: 200ms周期)
+    if ((millis() / 200) % 2 == 0) {
+      tone(kBuzzerPin, 800);
+    } else {
+      noTone(kBuzzerPin);
+    }
   } else {
     noTone(kBuzzerPin);
   }

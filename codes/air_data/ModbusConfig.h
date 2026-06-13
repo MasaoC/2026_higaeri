@@ -5,7 +5,7 @@
 
 constexpr uint32_t kDebugBaudRate = 115200;
 constexpr uint32_t kModbusBaudRate = 9600;
-constexpr uint32_t kModbusTimeoutMs = 1000;
+constexpr uint32_t kModbusTimeoutMs = 100;
 constexpr uint8_t kAirDataSlaveId = 1;
 
 constexpr uint16_t kAirDataReadStart = 0;
