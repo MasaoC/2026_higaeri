@@ -1,7 +1,7 @@
 (kicad_sch
-	(version 20250114)
+	(version 20260306)
 	(generator "eeschema")
-	(generator_version "9.0")
+	(generator_version "10.0")
 	(uuid "493bec57-bd9f-4f18-b3ef-0d7a091ad475")
 	(paper "A4")
 	(lib_symbols)
@@ -218,11 +218,13 @@
 			(type solid)
 		)
 		(fill
-			(color 0 0 0 0.0000)
+			(color 0 0 0 0)
 		)
 		(uuid "47c50de7-cf46-4b0d-a5de-9fa9c1508189")
 		(property "Sheetname" "2.logger"
 			(at 35.56 114.8584 0)
+			(show_name no)
+			(do_not_autoplace no)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -232,6 +234,8 @@
 		)
 		(property "Sheetfile" "loggerboard.kicad_sch"
 			(at 35.56 179.6546 0)
+			(show_name no)
+			(do_not_autoplace no)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -360,11 +364,13 @@
 			(type solid)
 		)
 		(fill
-			(color 0 0 0 0.0000)
+			(color 0 0 0 0)
 		)
 		(uuid "74d66bd8-4df7-47b8-ae0c-e0422dfba958")
 		(property "Sheetname" "3. TFT"
 			(at 35.56 37.3884 0)
+			(show_name no)
+			(do_not_autoplace no)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -374,6 +380,8 @@
 		)
 		(property "Sheetfile" "TFTboard.kicad_sch"
 			(at 35.56 86.9446 0)
+			(show_name no)
+			(do_not_autoplace no)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -592,11 +600,13 @@
 			(type solid)
 		)
 		(fill
-			(color 0 0 0 0.0000)
+			(color 0 0 0 0)
 		)
 		(uuid "b02d001d-6319-4ac4-9548-e2ade4fe4496")
 		(property "Sheetname" "RE12A_amplifier"
 			(at 186.69 32.9434 0)
+			(show_name no)
+			(do_not_autoplace no)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -606,6 +616,8 @@
 		)
 		(property "Sheetfile" "RE12A_amplifier.kicad_sch"
 			(at 186.69 58.3696 0)
+			(show_name no)
+			(do_not_autoplace no)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -694,11 +706,13 @@
 			(type solid)
 		)
 		(fill
-			(color 0 0 0 0.0000)
+			(color 0 0 0 0)
 		)
 		(uuid "b180609e-b288-4aa4-9dbc-4457c1dfdefc")
 		(property "Sheetname" "1. airdata"
 			(at 232.41 28.4984 0)
+			(show_name no)
+			(do_not_autoplace no)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -708,6 +722,8 @@
 		)
 		(property "Sheetfile" "untitled.kicad_sch"
 			(at 232.41 151.7146 0)
+			(show_name no)
+			(do_not_autoplace no)
 			(effects
 				(font
 					(size 1.27 1.27)

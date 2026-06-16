@@ -4,7 +4,14 @@
 
 constexpr uint8_t kEncoderPin = D8;
 constexpr uint8_t kStatusLedPin = D0;
-constexpr uint8_t kWindEspNowDeviceId = 0x03;
+
+// -----------------------------------------------------------------------------
+// デバイス設定
+// 1つ目の風速計（左主翼など）にする場合は 0x03、2つ目（右主翼など）にする場合は 0x04 に設定してください。
+// -----------------------------------------------------------------------------
+constexpr uint8_t kWindEspNowDeviceId = 0x04; 
+// -----------------------------------------------------------------------------
+
 constexpr uint32_t kSampleWindowUs = 500000UL;
 constexpr float kSampleWindowSec = 0.500f;
 constexpr float kWindSpeedPerPps = 1.0f / 1237.6f;

@@ -4,6 +4,7 @@
 #include <HardwareSerial.h>
 #include <SD.h>
 #include <SPI.h>
+#include <time.h>
 #include <WiFi.h>
 #include <Wire.h>
 
@@ -18,6 +19,14 @@ constexpr uint8_t kSpiSckPin = 8;
 constexpr uint8_t kSpiMisoPin = 9;
 constexpr uint8_t kSpiMosiPin = 10;
 constexpr uint8_t kSdChipSelectPin = 5;
+
+// NTP 時刻同期（WiFiテザリング等）
+// WiFi 環境がない場合は接続タイムアウト後にスキップされる
+constexpr const char* kNtpSsid         = "furuhashi";   // ← SSIDを入力
+constexpr const char* kNtpPassword     = "oldbridge";   // ← パスワードを入力
+constexpr long        kNtpGmtOffsetSec = 9L * 3600L;    // JST = UTC+9
+constexpr uint32_t    kNtpWifiTimeoutMs  = 30000;        // WiFi接続タイムアウト（テザリング起動待ちを含む）
+constexpr uint32_t    kNtpSyncTimeoutMs  = 10000;        // NTP応答タイムアウト
 
 // RS485 が連続でこの回数失敗したら ESP-NOW にフォールバック
 constexpr uint32_t kModbusFailureThreshold = 3;
@@ -78,6 +87,9 @@ uint32_t g_modbusConsecutiveFailures = 0;
 unsigned long g_lastAlarmWriteAt = 0;
 uint16_t g_lastRollAlarmValue = 0xFFFF;
 
+const uint8_t kBroadcastAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+uint32_t g_espNowSendSeq = 0;
+
 // ---- DS3231 RTC (Wire直接使用) ----------------------------------------
 constexpr uint8_t kRtcI2cAddr = 0x68;
 bool g_rtcReady = false;
@@ -85,9 +97,102 @@ bool g_rtcReady = false;
 static uint8_t bcdEncode(uint8_t val) { return ((val / 10) << 4) | (val % 10); }
 static uint8_t bcdDecode(uint8_t bcd) { return (bcd >> 4) * 10 + (bcd & 0x0F); }
 
+// NTP でRTCを更新する。WiFiが使えない場合は静かにスキップする。
+// ESP-NOW初期化の前に呼び出すこと（干渉防止）。
+static void syncTimeViaNtp() {
+  if (strlen(kNtpSsid) == 0 || strcmp(kNtpSsid, "YOUR_SSID") == 0) {
+    Serial.println("[NTP] SSID not configured, skip");
+    return;
+  }
+
+  Serial.print("[NTP] connecting to ");
+  Serial.print(kNtpSsid);
+  Serial.print(" ...");
+
+  WiFi.disconnect(true);   // 前回の接続残骸をクリア
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_POWER_21dBm);
+  WiFi.setMinSecurity(WIFI_AUTH_WPA2_PSK);  // WPA3 SAE 非互換対策：WPA2 に固定
+  WiFi.begin(kNtpSsid, kNtpPassword);
+
+  const uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < kNtpWifiTimeoutMs) {
+    delay(200);
+    Serial.print('.');
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println(" FAILED (timeout), skip NTP");
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return;
+  }
+  Serial.println(" connected");
+
+  // NTP サーバに問い合わせ（冗長化のため2サーバ指定）
+  configTime(kNtpGmtOffsetSec, 0, "ntp.nict.jp", "pool.ntp.org");
+
+  struct tm ti;
+  if (!getLocalTime(&ti, kNtpSyncTimeoutMs)) {
+    Serial.println("[NTP] getLocalTime timeout, skip");
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return;
+  }
+
+  // RTC (DS3231) に書き込む
+  Wire.beginTransmission(kRtcI2cAddr);
+  Wire.write(0x00);
+  Wire.write(bcdEncode((uint8_t)ti.tm_sec));
+  Wire.write(bcdEncode((uint8_t)ti.tm_min));
+  Wire.write(bcdEncode((uint8_t)ti.tm_hour));
+  Wire.write(0x01);  // 曜日（未使用）
+  Wire.write(bcdEncode((uint8_t)ti.tm_mday));
+  Wire.write(bcdEncode((uint8_t)(ti.tm_mon + 1)));
+  Wire.write(bcdEncode((uint8_t)(ti.tm_year - 100)));  // 年下2桁
+  if (Wire.endTransmission() == 0) {
+    Serial.printf("[NTP] RTC synced: %04d-%02d-%02d %02d:%02d:%02d\n",
+                  ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
+                  ti.tm_hour, ti.tm_min, ti.tm_sec);
+  } else {
+    Serial.println("[NTP] RTC write failed");
+  }
+
+  // WiFi を完全切断してから ESP-NOW 初期化に備える
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(100);  // WiFiスタック安定待ち
+}
+
 // OSF フラグを確認し、オシレータが止まっていた場合のみコンパイル時刻を書き込む
 static void initRtc() {
-  // OSF フラグ（ステータスレジスタ 0x0F の bit7）を読む
+  // ── Step 1: コントロールレジスタ 0x0E の EOSC ビット(bit7)を無条件クリア ──
+  // EOSC=1 だとバッテリーバックアップ時に発振が停止する。
+  // 毎回起動時に確認・クリアすることで、OSFが連鎖的にセットされ続けるのを防ぐ。
+  Wire.beginTransmission(kRtcI2cAddr);
+  Wire.write(0x0E);
+  if (Wire.endTransmission() != 0 || Wire.requestFrom((uint8_t)kRtcI2cAddr, (uint8_t)1) < 1) {
+    Serial.println("[RTC] control reg read FAILED");
+    g_rtcReady = false;
+    return;
+  }
+  const uint8_t ctrlReg = Wire.read();
+  Serial.printf("[RTC] ctrl=0x%02X EOSC=%d\n", ctrlReg, (ctrlReg >> 7) & 1);
+  if (ctrlReg & 0x80) {
+    Wire.beginTransmission(kRtcI2cAddr);
+    Wire.write(0x0E);
+    Wire.write(ctrlReg & ~0x80);
+    if (Wire.endTransmission() != 0) {
+      Serial.println("[RTC] EOSC clear FAILED");
+      g_rtcReady = false;
+      return;
+    }
+    Serial.println("[RTC] EOSC cleared");
+  }
+
+  // ── Step 2: OSF フラグ（ステータスレジスタ 0x0F の bit7）を読む ──
   Wire.beginTransmission(kRtcI2cAddr);
   Wire.write(0x0F);
   if (Wire.endTransmission() != 0 || Wire.requestFrom((uint8_t)kRtcI2cAddr, (uint8_t)1) < 1) {
@@ -96,8 +201,9 @@ static void initRtc() {
   }
   const uint8_t statusReg = Wire.read();
   g_rtcReady = true;
+  Serial.printf("[RTC] status=0x%02X OSF=%d\n", statusReg, (statusReg >> 7) & 1);
 
-  // コンパイル時刻を計算
+  // ── Step 3: コンパイル時刻を計算 ──
   const char* months = "JanFebMarAprMayJunJulAugSepOctNovDec";
   char mon[4] = {__DATE__[0], __DATE__[1], __DATE__[2], '\0'};
   const char* found = strstr(months, mon);
@@ -107,40 +213,45 @@ static void initRtc() {
   uint8_t compileHour  = (__TIME__[0] - '0') * 10 + (__TIME__[1] - '0');
   uint8_t compileMin   = (__TIME__[3] - '0') * 10 + (__TIME__[4] - '0');
   uint8_t compileSec   = (__TIME__[6] - '0') * 10 + (__TIME__[7] - '0');
+  Serial.printf("[RTC] compile=20%02d-%02d-%02d %02d:%02d:%02d\n",
+                compileYear, compileMonth, compileDay,
+                compileHour, compileMin, compileSec);
 
-  // コンパイル時刻をシリアル番号に変換（比較用）
   const uint32_t compileSerial = ((uint32_t)compileYear  * 100000000UL)
                                 + ((uint32_t)compileMonth * 1000000UL)
                                 + ((uint32_t)compileDay   * 10000UL)
                                 + ((uint32_t)compileHour  * 100UL)
                                 + ((uint32_t)compileMin);
 
-  // OSF=0 かつ RTC 時刻がコンパイル時刻以降なら書き込み不要
+  // ── Step 4: OSF=0 かつ RTC 時刻がコンパイル時刻以降なら書き込み不要 ──
   if ((statusReg & 0x80) == 0) {
     Wire.beginTransmission(kRtcI2cAddr);
     Wire.write(0x00);
     if (Wire.endTransmission() == 0 && Wire.requestFrom((uint8_t)kRtcI2cAddr, (uint8_t)7) >= 7) {
       Wire.read();  // sec（スキップ）
-      Wire.read();  // min（スキップ）
-      Wire.read();  // hour（スキップ）
+      uint8_t rtcMin   = bcdDecode(Wire.read() & 0x7F);
+      uint8_t rtcHour  = bcdDecode(Wire.read() & 0x3F);
       Wire.read();  // 曜日（スキップ）
       uint8_t rtcDay   = bcdDecode(Wire.read() & 0x3F);
       uint8_t rtcMonth = bcdDecode(Wire.read() & 0x1F);
       uint8_t rtcYear  = bcdDecode(Wire.read());
       const uint32_t rtcSerial = ((uint32_t)rtcYear  * 100000000UL)
                                 + ((uint32_t)rtcMonth * 1000000UL)
-                                + ((uint32_t)rtcDay   * 10000UL);
+                                + ((uint32_t)rtcDay   * 10000UL)
+                                + ((uint32_t)rtcHour  * 100UL)
+                                + ((uint32_t)rtcMin);
+      Serial.printf("[RTC] current=20%02d-%02d-%02d %02d:%02d (serial=%lu)\n",
+                    rtcYear, rtcMonth, rtcDay, rtcHour, rtcMin, rtcSerial);
       if (rtcSerial >= compileSerial) {
-        Serial.println("[logger] RTC time is valid, skipping write");
         return;
       }
-      Serial.println("[logger] RTC time older than compile time, updating");
+      Serial.println("[RTC] time older than compile time, updating");
     }
   } else {
-    Serial.println("[logger] RTC oscillator stopped, writing compile time");
+    Serial.println("[RTC] OSF set: oscillator was stopped, writing compile time");
   }
 
-  // RTC に時刻を書き込む
+  // ── Step 5: RTC に時刻を書き込む ──
   Wire.beginTransmission(kRtcI2cAddr);
   Wire.write(0x00);
   Wire.write(bcdEncode(compileSec));
@@ -155,37 +266,16 @@ static void initRtc() {
     return;
   }
 
-  // OSF フラグをクリア
+  // ── Step 6: OSF フラグをクリア ──
   Wire.beginTransmission(kRtcI2cAddr);
   Wire.write(0x0F);
   Wire.write(statusReg & ~0x80);
   if (Wire.endTransmission() != 0) {
-    Serial.println("[logger] RTC OSF clear FAILED");
+    Serial.println("[RTC] OSF clear FAILED");
     g_rtcReady = false;
     return;
   }
-
-  // コントロールレジスタ 0x0E の EOSC ビット(bit7)を 0 にする
-  // EOSC=1 だとバッテリーバックアップ時に発振が停止する
-  Wire.beginTransmission(kRtcI2cAddr);
-  Wire.write(0x0E);
-  if (Wire.endTransmission() != 0 || Wire.requestFrom((uint8_t)kRtcI2cAddr, (uint8_t)1) < 1) {
-    Serial.println("[logger] RTC control reg read FAILED");
-    g_rtcReady = false;
-    return;
-  }
-  const uint8_t ctrlReg = Wire.read();
-  if (ctrlReg & 0x80) {
-    Wire.beginTransmission(kRtcI2cAddr);
-    Wire.write(0x0E);
-    Wire.write(ctrlReg & ~0x80);
-    if (Wire.endTransmission() != 0) {
-      Serial.println("[logger] RTC EOSC clear FAILED");
-      g_rtcReady = false;
-      return;
-    }
-    Serial.println("[logger] RTC EOSC cleared (was set)");
-  }
+  Serial.println("[RTC] compile time written, OSF cleared");
 }
 
 // "YYYY-MM-DD HH:MM:SS" を取得。失敗時は "BOOT+XXXXXms" にフォールバック
@@ -210,6 +300,8 @@ static void getRtcTimestamp(char* buf, size_t bufLen) {
 // ---- BNO085 IMU (I2C) -------------------------------------------------
 Adafruit_BNO08x g_bno08x(-1);
 bool g_imuReady = false;
+static unsigned long g_lastImuRetryTime = 0;
+static int g_imuFailCount = 0;
 
 struct {
   float roll  = 0.0f;
@@ -218,15 +310,46 @@ struct {
 } g_imuData;
 
 static void readIMUData() {
-  if (!g_imuReady) return;
+  if (!g_imuReady) {
+    unsigned long now = millis();
+    if (now - g_lastImuRetryTime > 5000) {
+      g_lastImuRetryTime = now;
+      Serial.println("[logger] Retrying BNO085 initialization...");
+      if (g_bno08x.begin_I2C()) {
+        g_imuReady = g_bno08x.enableReport(SH2_ARVR_STABILIZED_RV, 5000);
+        if (g_imuReady) {
+          Serial.println("[logger] BNO085 Re-initialization SUCCESS");
+          g_imuFailCount = 0;
+        } else {
+          Serial.println("[logger] BNO085 Re-initialization FAILED to enable report");
+        }
+      } else {
+        Serial.println("[logger] BNO085 Re-initialization FAILED to begin");
+      }
+    }
+    return;
+  }
 
   if (g_bno08x.wasReset()) {
     g_imuReady = g_bno08x.enableReport(SH2_ARVR_STABILIZED_RV, 5000);
+    if (!g_imuReady) {
+      Serial.println("[logger] BNO085 reset detected, but failed to re-enable report");
+    }
     return;
   }
 
   sh2_SensorValue_t ev;
-  if (!g_bno08x.getSensorEvent(&ev)) return;
+  if (!g_bno08x.getSensorEvent(&ev)) {
+    g_imuFailCount++;
+    if (g_imuFailCount > 100) { // 連続失敗時の安全策。一時的な不調なら再初期化に回す
+      Serial.println("[logger] BNO085 consecutive reading failures. Resetting state for retry...");
+      g_imuReady = false;
+      g_imuFailCount = 0;
+    }
+    return;
+  }
+  g_imuFailCount = 0;
+
   if (ev.sensorId != SH2_ARVR_STABILIZED_RV) return;
 
   const float qr = ev.un.arvrStabilizedRV.real;
@@ -241,7 +364,13 @@ static void readIMUData() {
 }
 
 static void writeRollAlarm() {
-  const uint16_t alarm = (g_imuData.roll > 5.0f || g_imuData.roll < -5.0f) ? uint16_t(1) : uint16_t(0);
+  uint16_t alarm = 0;
+  if (g_imuData.roll < -5.0f) {
+    alarm = 1;  // 左ロール（L-ALARM）
+  } else if (g_imuData.roll > 5.0f) {
+    alarm = 2;  // 右ロール（R-ALARM）
+  }
+
   if (alarm == g_lastRollAlarmValue) {
     return;
   }
@@ -378,6 +507,25 @@ void writeLogRecord() {
   file.close();
 }
 
+void sendDataByEspNow() {
+  EspNowAirDataPacket packet = {};
+  packet.deviceId = kAirDataEspNowDeviceId; // 0x01
+  packet.reserved = 0;
+  packet.windSpeed = g_airDataBuffer[0];
+  
+  const bool airEspNowFresh = (millis() - g_airEspNowLastReceivedAt) < kEspNowStaleMs;
+  packet.pulseCountMin = airEspNowFresh ? g_airEspNowLatest.pulseCountMin : 0;
+  packet.pulseCountMax = airEspNowFresh ? g_airEspNowLatest.pulseCountMax : 0;
+  packet.pulseCountTotal = airEspNowFresh ? g_airEspNowLatest.pulseCountTotal : 0;
+
+  packet.as5600Primary = g_displayBuffer[1];    // pot1
+  packet.as5600Secondary = g_displayBuffer[2];  // pot2
+  packet.batteryRaw = g_airDataBuffer[3];
+  packet.sequenceNumber = g_espNowSendSeq++;
+
+  esp_now_send(kBroadcastAddress, reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+}
+
 }  // namespace
 
 void onEspNowReceive(const esp_now_recv_info_t* /*recvInfo*/, const uint8_t* data, int len) {
@@ -460,7 +608,9 @@ void setup() {
   g_master.begin();
 
   Wire.begin();
+  Wire.setTimeOut(150); // BNO085のクロックストレッチング対策（I2Cタイムアウトを150msに引き上げ）
   initRtc();
+  syncTimeViaNtp();  // NTP同期（WiFi利用可能時のみ）。ESP-NOW初期化より前に実行。
   Serial.printf("[logger] RTC %s\n", g_rtcReady ? "OK" : "FAILED");
 
   if (g_bno08x.begin_I2C()) {
@@ -475,6 +625,18 @@ void setup() {
   WiFi.disconnect();
   if (esp_now_init() == ESP_OK) {
     esp_now_register_recv_cb(onEspNowReceive);
+
+    // 送信ピアの登録（デュアルモニターへのブロードキャスト転送用）
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, kBroadcastAddress, 6);
+    peer.channel = 0;
+    peer.encrypt = false;
+    if (esp_now_add_peer(&peer) == ESP_OK) {
+      Serial.println("[logger] ESP-NOW broadcast peer added");
+    } else {
+      Serial.println("[logger] ESP-NOW failed to add peer");
+    }
+
     Serial.println("[logger] ESP-NOW init OK");
   } else {
     Serial.println("[logger] ESP-NOW init FAILED");
@@ -493,6 +655,7 @@ void loop() {
   if (millis() - g_lastPollAt >= kLoggerPollIntervalMs) {
     g_lastPollAt = millis();
     pollDevices();
+    sendDataByEspNow();
     const bool usingFallback = g_modbusConsecutiveFailures >= kModbusFailureThreshold
                               && (millis() - g_airEspNowLastReceivedAt) < kEspNowStaleMs;
     char ts[24];

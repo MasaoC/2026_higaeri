@@ -5,6 +5,7 @@
 
 constexpr uint32_t kDebugBaudRate = 115200;
 constexpr uint32_t kModbusBaudRate = 9600;
+constexpr uint32_t kModbusTimeoutMs = 100;  // 統一: air_data, logger と同じ値
 constexpr uint32_t kDisplayRefreshIntervalMs = 100;
 constexpr uint32_t kDisplayI2CPollIntervalMs = 100;
 constexpr uint8_t kDisplaySlaveId = 2;
