@@ -35,9 +35,63 @@ constexpr uint32_t kDebugPrintIntervalMs = 1000;
 constexpr uint32_t kDisplayRefreshIntervalMs = 100;
 
 namespace {
+// 移動平均（Smoothing）フィルタ
+template <size_t N = 10>
+class SmoothingFilter {
+public:
+  SmoothingFilter() {
+    clear();
+  }
+
+  void clear() {
+    for (size_t i = 0; i < N; ++i) {
+      m_readings[i] = 0;
+    }
+    m_readIndex = 0;
+    m_total = 0;
+    m_average = 0;
+    m_initialized = false;
+  }
+
+  void add(int newValue) {
+    if (!m_initialized) {
+      for (size_t i = 0; i < N; ++i) {
+        m_readings[i] = newValue;
+      }
+      m_total = newValue * N;
+      m_average = newValue;
+      m_initialized = true;
+      return;
+    }
+    m_total = m_total - m_readings[m_readIndex];
+    m_readings[m_readIndex] = newValue;
+    m_total = m_total + newValue;
+    m_readIndex++;
+    if (m_readIndex >= N) {
+      m_readIndex = 0;
+    }
+    m_average = m_total / N;
+  }
+
+  int get() const {
+    return m_average;
+  }
+
+private:
+  int m_readings[N];
+  size_t m_readIndex;
+  int m_total;
+  int m_average;
+  bool m_initialized;
+};
+
 // HC-SR04: Serial0 (XIAO ESP32-C3 デフォルトUART D6/D7)
 TFT_eSPI g_tft;
 DisplayD2Payload g_payload = {0, 0, 0, 0};
+SmoothingFilter<10> g_pot1Filter;
+SmoothingFilter<10> g_pot2Filter;
+unsigned long g_lastAnalogUpdateAt = 0;
+constexpr uint32_t kAnalogUpdateIntervalMs = 10;  // 10msごとにアナログサンプリングして移動平均を更新
 unsigned long g_lastUpdateAt = 0;
 unsigned long g_lastDebugAt = 0;
 unsigned long g_lastRenderAt = 0;
@@ -92,21 +146,29 @@ void writePayload() {
 }
 
 void updateSensors() {
-  if (millis() - g_lastUpdateAt < kDisplayD2SensorIntervalMs) {
-    return;
+  const unsigned long now = millis();
+
+  // ポテンショメータの値を高頻度(10msごと)でサンプリングし、移動平均でノイズ除去・精度向上
+  if (now - g_lastAnalogUpdateAt >= kAnalogUpdateIntervalMs) {
+    g_lastAnalogUpdateAt = now;
+    g_pot1Filter.add(analogRead(kPot1Pin));
+    g_pot2Filter.add(analogRead(kPot2Pin));
+    g_payload.potentiometer1 = g_pot1Filter.get();
+    g_payload.potentiometer2 = g_pot2Filter.get();
+    g_payload.batteryVoltage = analogRead(kBatteryPin);
   }
-  g_lastUpdateAt = millis();
 
-  g_payload.potentiometer1 = analogRead(kPot1Pin);
-  g_payload.potentiometer2 = analogRead(kPot2Pin);
-  g_payload.batteryVoltage = analogRead(kBatteryPin);
+  // 超音波センサーは300ms間隔
+  if (now - g_lastUpdateAt >= kDisplayD2SensorIntervalMs) {
+    g_lastUpdateAt = now;
 
-  uint16_t distanceCm = 0;
-  if (readUltrasonicDistance(distanceCm)) {
-    g_payload.ultrasonicAlt = distanceCm;
-    g_ultrasonicValid = true;
-  } else {
-    g_ultrasonicValid = false;
+    uint16_t distanceCm = 0;
+    if (readUltrasonicDistance(distanceCm)) {
+      g_payload.ultrasonicAlt = distanceCm;
+      g_ultrasonicValid = true;
+    } else {
+      g_ultrasonicValid = false;
+    }
   }
 }
 
@@ -212,16 +274,18 @@ void loop() {
   printDebug();
 
   if (g_rollAlarm == 1) {
-    // 左ロール警告音: 高く鋭い「ピピピピッ」 (1200Hz 高速断続音: 75ms周期)
-    if ((millis() / 75) % 2 == 0) {
-      tone(kBuzzerPin, 1200);
+    // 左ロール警告音: 高→低の下降スイープ (1400Hz→600Hz, 500ms) + 100ms無音
+    const uint32_t phaseL = millis() % 600;
+    if (phaseL < 500) {
+      tone(kBuzzerPin, static_cast<uint32_t>(1400 - phaseL * 800 / 500));
     } else {
       noTone(kBuzzerPin);
     }
   } else if (g_rollAlarm == 2) {
-    // 右ロール警告音: 少し低めの「ポー、ポー、ポー」 (800Hz 低速低音断続音: 200ms周期)
-    if ((millis() / 200) % 2 == 0) {
-      tone(kBuzzerPin, 800);
+    // 右ロール警告音: 低→高の上昇スイープ (600Hz→1400Hz, 500ms) + 100ms無音
+    const uint32_t phaseR = millis() % 600;
+    if (phaseR < 500) {
+      tone(kBuzzerPin, static_cast<uint32_t>(600 + phaseR * 800 / 500));
     } else {
       noTone(kBuzzerPin);
     }
