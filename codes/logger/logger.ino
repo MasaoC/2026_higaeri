@@ -52,7 +52,7 @@ struct EspNowAirDataPacket {
   uint16_t windSpeed;
   uint16_t pulseCountMin;
   uint16_t pulseCountMax;
-  uint16_t pulseCountTotal; // 0.5 s 窓の 20 Hz サンプル総パルス数
+  uint16_t pulseCountTotal; // 0.5 s 窓の 20 Hz サンプル総パルス数（生カウント）
   uint16_t as5600Primary;
   uint16_t as5600Secondary;
   uint16_t batteryRaw;
@@ -418,7 +418,7 @@ void initSdCard() {
   if (!SD.exists(kLogFilePath)) {
     File file = SD.open(kLogFilePath, FILE_WRITE);
     if (file) {
-      file.println("timestamp,airspeed,pulse_min,pulse_max,pulse_total,wind_board_pulse,wind2_pulse,as5600_1,as5600_2,air_battery,baro_alt,pot1,pot2,display_battery,ultrasonic,roll,pitch,yaw");
+      file.println("timestamp,airspeed,pulse_min,pulse_max,pulse_total,wind_board_pulse,wind2_pulse,as5600_1,as5600_2,air_battery,baro_alt,elevator,rudder,display_battery,ultrasonic,roll,pitch,yaw");
       file.close();
     }
   }
