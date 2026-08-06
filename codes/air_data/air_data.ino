@@ -27,6 +27,8 @@ constexpr float kAirspeedSamplePeriodSec = 0.050f;
 constexpr uint8_t kEspNowBroadcastSamples = 10;
 constexpr float kAirspeedPerPps = 1.0f / 1186.6f;  // encoder1
 constexpr float kAirspeedOffset = 0.4f;
+constexpr float kAirspeedCorrectionFactor = 1.01f;
+constexpr float kAirspeedCorrectionOffset = -0.34f;
 constexpr uint32_t kDebugPrintIntervalMs = 1000;
 static_assert(kAirspeedSamplePeriodUs * kEspNowBroadcastSamples == 500000UL,
               "ESP-NOW broadcast window must stay at 0.5 seconds");
@@ -143,7 +145,7 @@ void sendEspNow() {
   EspNowAirDataPacket packet;
   packet.deviceId = 0x01;
   packet.reserved = 0;
-  packet.windSpeed = convertPulseCountToWindSpeed(g_lastPulseCountMin, kAirspeedSamplePeriodSec);
+  packet.windSpeed = g_snapshot.windSpeed;
   packet.pulseCountMin = static_cast<uint16_t>(g_lastPulseCountMin);
   packet.pulseCountMax = static_cast<uint16_t>(g_lastPulseCountMax);
   packet.pulseCountTotal = static_cast<uint16_t>(g_lastPulseCountTotal);
@@ -173,7 +175,7 @@ void onSampleTimer(void* /*arg*/) {
 uint16_t convertPulseCountToWindSpeed(uint32_t pulseCountInWindow, float elapsedSec) {
   // Replace this linear model once the actual calibration formula is fixed.
   const float pulsesPerSec = static_cast<float>(pulseCountInWindow) / elapsedSec;
-  const float windSpeed = (kAirspeedPerPps * pulsesPerSec) + kAirspeedOffset;
+  const float windSpeed = ((kAirspeedPerPps * pulsesPerSec) + kAirspeedOffset)*kAirspeedCorrectionFactor + kAirspeedCorrectionOffset;
 
   if (windSpeed <= 0.0f) {
     return 0;
@@ -196,9 +198,6 @@ void updateWindSpeed() {
   g_lastPulseCountInSample = sampleSlot.pulseCount;
   g_lastPulsesPerSec = static_cast<float>(sampleSlot.pulseCount) / kAirspeedSamplePeriodSec;
 
-  const uint16_t windSpeed = convertPulseCountToWindSpeed(sampleSlot.pulseCount, kAirspeedSamplePeriodSec);
-  g_snapshot.windSpeed = windSpeed;
-
   if (g_windowSampleCount == 0) {
     g_windowPulseCountMin = sampleSlot.pulseCount;
     g_windowPulseCountMax = sampleSlot.pulseCount;
@@ -215,9 +214,10 @@ void updateWindSpeed() {
 
   g_windowSampleCount++;
   if (g_windowSampleCount >= kEspNowBroadcastSamples) {
-    g_lastPulseCountMin = g_windowPulseCountMin;
-    g_lastPulseCountMax = g_windowPulseCountMax;
+    g_lastPulseCountMin = static_cast<uint32_t>(g_windowPulseCountMin / kAirspeedSamplePeriodSec);
+    g_lastPulseCountMax = static_cast<uint32_t>(g_windowPulseCountMax / kAirspeedSamplePeriodSec);
     g_lastPulseCountTotal = g_windowPulseCountTotal;
+    g_snapshot.windSpeed = convertPulseCountToWindSpeed(g_windowPulseCountMin, kAirspeedSamplePeriodSec);
     g_windowSampleCount = 0;
     g_broadcastWindowReady = true;
   }
@@ -283,9 +283,8 @@ void printDebug() {
     return;
   }
   g_lastDebugAt = millis();
-  Serial.printf("[air_data] windSpeed=%.1f  txMin=%.1f  pulseMin=%lu  pulseMax=%lu  pulse20Hz=%lu  pulseRate=%.1f  pulseTotal=%lu  battRaw=%u  aoa=%u%s  aos=%u%s\n",
+  Serial.printf("[air_data] windSpeed=%.1f  pulseMin=%lu  pulseMax=%lu  pulse20Hz=%lu  pulseRate=%.1f  pulseTotal=%lu  battRaw=%u  aoa=%u%s  aos=%u%s\n",
                 g_snapshot.windSpeed / 10.0f,
-                convertPulseCountToWindSpeed(g_lastPulseCountMin, kAirspeedSamplePeriodSec) / 10.0f,
                 static_cast<unsigned long>(g_lastPulseCountMin),
                 static_cast<unsigned long>(g_lastPulseCountMax),
                 static_cast<unsigned long>(g_lastPulseCountInSample),
@@ -304,7 +303,10 @@ void setup() {
   delay(100);
 
   pinMode(kStatusLedPin, OUTPUT);
-  digitalWrite(kStatusLedPin, LOW);
+  digitalWrite(kStatusLedPin, HIGH);
+  delay(500);
+
+  digitalWrite (kStatusLedPin, LOW);
   pinMode(kEncoderPin, INPUT_PULLUP);
   pinMode(kBatterySensePin, INPUT);
   attachInterrupt(digitalPinToInterrupt(kEncoderPin), handleEncoderPulse, FALLING);

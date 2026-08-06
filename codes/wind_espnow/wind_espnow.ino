@@ -7,15 +7,15 @@ constexpr uint8_t kStatusLedPin = D0;
 
 // -----------------------------------------------------------------------------
 // デバイス設定
-// 1つ目の風速計（左主翼など）にする場合は 0x03、2つ目（右主翼など）にする場合は 0x04 に設定してください。
+// 左主翼にする場合は 0x03、2つ目右主翼にする場合は 0x04 に設定
 // -----------------------------------------------------------------------------
 constexpr uint8_t kWindEspNowDeviceId = 0x04; 
 // -----------------------------------------------------------------------------
 
 constexpr uint32_t kSampleWindowUs = 500000UL;
 constexpr float kSampleWindowSec = 0.500f;
-constexpr float kWindSpeedPerPps = 1.0f / 1237.6f;
-constexpr float kWindSpeedOffset = 0.44f;
+constexpr float kWindSpeedPerPps = 1.0f;
+constexpr float kWindSpeedOffset = 0.0f;
 constexpr uint32_t kDebugPrintIntervalMs = 1000;
 constexpr uint32_t kEncoderDebounceUs = 50UL;  // 最小パルス間隔81μs(10m/s時)より小さく設定
 
@@ -163,7 +163,7 @@ void loop() {
   uint16_t windSpeedDeci = 0;
 
   if (updateMeasurement(sampleSlot, pulsesPerSec, windSpeedDeci)) {
-    sendEspNow(windSpeedDeci);
+    sendEspNow(static_cast<uint16_t>(sampleSlot.pulseCount));  // 生パルスカウント（0.5s窓）を送信
   }
 
   printDebug();

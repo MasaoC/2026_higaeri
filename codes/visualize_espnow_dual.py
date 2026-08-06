@@ -11,9 +11,10 @@ import serial
 
 
 AIR_PATTERN = re.compile(r"air=.*?spd=([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
-WIND_PATTERN = re.compile(r"wind=.*?spd=([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
-WIND1_PATTERN = re.compile(r"w1=([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
-WIND2_PATTERN = re.compile(r"w2=([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+WIND_PATTERN = re.compile(r"\bwind=\[pulse=([0-9]+)", re.IGNORECASE)       # logger: wind=[pulse=N
+WIND2_LOG_PATTERN = re.compile(r"\bwind2=\[pulse=([0-9]+)", re.IGNORECASE)   # logger: wind2=[pulse=N
+WIND1_PATTERN = re.compile(r"w1=([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)       # espnow_dual_monitor: w1=N.N
+WIND2_PATTERN = re.compile(r"w2=([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)       # espnow_dual_monitor: w2=N.N
 DISP_PATTERN = re.compile(r"disp=.*?pot1=([0-9]+)\s+pot2=([0-9]+)", re.IGNORECASE)
 STALE_TIMEOUT_SEC = 2.0
 
@@ -35,6 +36,18 @@ STEER_X_MAX_DEG = 30.0   # 横軸最大表示舵角（度）
 STEER_Y_MAX_DEG = 30.0   # 縦軸最大表示舵角（度）
 
 MAX_TRAIL_DOTS = 15      # 軌跡（残像）として描画する点の最大数
+
+# ─── 主翼風速計 パルスカウント → 風速 変換パラメーター ───────────────────────────
+# W = P / WIND_PPS_DIVISOR + WIND_SPEED_OFFSET  (P = PPS)
+WIND_PPS_DIVISOR = 1237.6
+WIND_SPEED_OFFSET = 0.44
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def pulse_to_wind(pps: int) -> float:
+    """PPS（パルス毎秒）から風速 m/s に変換する。W = P/1237.6 + 0.44"""
+    return pps / WIND_PPS_DIVISOR + WIND_SPEED_OFFSET
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -301,6 +314,7 @@ class App:
 
             air_match = AIR_PATTERN.search(line)
             wind_match = WIND_PATTERN.search(line)
+            wind2_log_match = WIND2_LOG_PATTERN.search(line)
             wind1_match = WIND1_PATTERN.search(line)
             wind2_match = WIND2_PATTERN.search(line)
             disp_match = DISP_PATTERN.search(line)
@@ -311,19 +325,24 @@ class App:
                 self.air_panel.update(self.last_air)
                 matched = True
             
-            # w1 / w2 の個別データがあればそれぞれ展開。なければ従来の統合wind値（ロガー等）をwind1にフォールバック
+            # w1 / w2: espnow_dual_monitor から来る場合は m/s 変換済み。
+            # logger から来る場合は pulse=[N] 形式の整数で、W = P/1237.6 + 0.44 で変換する。
             if wind1_match:
-                self.last_wind1 = float(wind1_match.group(1))
+                self.last_wind1 = float(wind1_match.group(1))  # espnow_dual_monitor: 既に m/s
                 self.wind1_panel.update(self.last_wind1)
                 matched = True
             elif wind_match:
-                self.last_wind = float(wind_match.group(1))
-                self.last_wind1 = self.last_wind
+                self.last_wind1 = pulse_to_wind(int(wind_match.group(1)))  # logger: パルスカウント変換
+                self.last_wind = self.last_wind1
                 self.wind1_panel.update(self.last_wind1)
                 matched = True
 
             if wind2_match:
-                self.last_wind2 = float(wind2_match.group(1))
+                self.last_wind2 = float(wind2_match.group(1))  # espnow_dual_monitor: 既に m/s
+                self.wind2_panel.update(self.last_wind2)
+                matched = True
+            elif wind2_log_match:
+                self.last_wind2 = pulse_to_wind(int(wind2_log_match.group(1)))  # logger: パルスカウント変換
                 self.wind2_panel.update(self.last_wind2)
                 matched = True
             
@@ -333,7 +352,7 @@ class App:
                 self.last_steer_x, self.last_steer_y = self.steer_panel.update_steer(self.last_pot1, self.last_pot2)
                 matched = True
                 
-            if air_match or wind_match or wind1_match or wind2_match or disp_match:
+            if air_match or wind_match or wind2_log_match or wind1_match or wind2_match or disp_match:
                 self.status_var.set("receiving")
 
             if matched and self.csv_file:

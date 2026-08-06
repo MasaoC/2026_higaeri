@@ -33,7 +33,8 @@ constexpr uint32_t kModbusFailureThreshold = 3;
 // ESP-NOW パケットがこの時間 (ms) 以内に届いていれば有効とみなす
 constexpr uint32_t kEspNowStaleMs = 2000;
 constexpr uint8_t kAirDataEspNowDeviceId = 0x01;
-constexpr uint8_t kWindEspNowDeviceId = 0x03;
+constexpr uint8_t kWindEspNowDeviceId  = 0x03;
+constexpr uint8_t kWind2EspNowDeviceId = 0x04;
 
 struct EspNowLegacyPacket {
   uint8_t  deviceId;
@@ -51,7 +52,7 @@ struct EspNowAirDataPacket {
   uint16_t windSpeed;
   uint16_t pulseCountMin;
   uint16_t pulseCountMax;
-  uint16_t pulseCountTotal; // 0.5 s 窓の 20 Hz サンプル総パルス数
+  uint16_t pulseCountTotal; // 0.5 s 窓の 20 Hz サンプル総パルス数（生カウント）
   uint16_t as5600Primary;
   uint16_t as5600Secondary;
   uint16_t batteryRaw;
@@ -81,8 +82,10 @@ unsigned long g_lastPollAt = 0;
 unsigned long g_lastLedToggleAt = 0;
 EspNowAirDataPacket g_airEspNowLatest = {};
 EspNowLegacyPacket g_windEspNowLatest = {};
+EspNowLegacyPacket g_wind2EspNowLatest = {};
 unsigned long g_airEspNowLastReceivedAt = 0;
 unsigned long g_windEspNowLastReceivedAt = 0;
+unsigned long g_wind2EspNowLastReceivedAt = 0;
 uint32_t g_modbusConsecutiveFailures = 0;
 unsigned long g_lastAlarmWriteAt = 0;
 uint16_t g_lastRollAlarmValue = 0xFFFF;
@@ -415,7 +418,7 @@ void initSdCard() {
   if (!SD.exists(kLogFilePath)) {
     File file = SD.open(kLogFilePath, FILE_WRITE);
     if (file) {
-      file.println("timestamp,airspeed,pulse_min,pulse_max,pulse_total,wind_board_airspeed,as5600_1,as5600_2,air_battery,baro_alt,pot1,pot2,display_battery,ultrasonic,roll,pitch,yaw");
+      file.println("timestamp,airspeed,pulse_min,pulse_max,pulse_total,wind_board_pulse,wind2_pulse,as5600_1,as5600_2,air_battery,baro_alt,elevator,rudder,display_battery,ultrasonic,roll,pitch,yaw");
       file.close();
     }
   }
@@ -471,16 +474,22 @@ void writeLogRecord() {
   const uint16_t airPulseMax   = airEspNowFresh ? g_airEspNowLatest.pulseCountMax   : 0;
   const uint16_t airPulseTotal = airEspNowFresh ? g_airEspNowLatest.pulseCountTotal : 0;
 
+  const uint16_t windPulse  = ((millis() - g_windEspNowLastReceivedAt)  < kEspNowStaleMs)
+                              ? g_windEspNowLatest.windSpeed  : 0;
+  const uint16_t wind2Pulse = ((millis() - g_wind2EspNowLastReceivedAt) < kEspNowStaleMs)
+                              ? g_wind2EspNowLatest.windSpeed : 0;
+
   char record[512];
   snprintf(record,
            sizeof(record),
-           "%s,%.1f,%u,%u,%u,%.1f,%u,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f,%.2f\n",
+           "%s,%.1f,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f,%.2f\n",
            timestamp,
            g_airDataBuffer[0] / 10.0f,
            airPulseMin,
            airPulseMax,
            airPulseTotal,
-           g_windEspNowLatest.windSpeed / 10.0f,
+           windPulse,
+           wind2Pulse,
            g_airDataBuffer[1],
            g_airDataBuffer[2],
            g_airDataBuffer[3],
@@ -560,6 +569,14 @@ void onEspNowReceive(const esp_now_recv_info_t* /*recvInfo*/, const uint8_t* dat
     }
     g_windEspNowLatest = *reinterpret_cast<const EspNowLegacyPacket*>(data);
     g_windEspNowLastReceivedAt = millis();
+    return;
+  }
+  if (deviceId == kWind2EspNowDeviceId) {
+    if (len != static_cast<int>(sizeof(EspNowLegacyPacket))) {
+      return;
+    }
+    g_wind2EspNowLatest = *reinterpret_cast<const EspNowLegacyPacket*>(data);
+    g_wind2EspNowLastReceivedAt = millis();
   }
 }
 
@@ -660,14 +677,15 @@ void loop() {
                               && (millis() - g_airEspNowLastReceivedAt) < kEspNowStaleMs;
     char ts[24];
     getRtcTimestamp(ts, sizeof(ts));
-    Serial.printf("[logger] %s  sd=%s  cycle=%s  src=%s  air=[spd=%.1f pmin=%u pmax=%u as1=%u as2=%u batt=%u]  wind=[spd=%.1f seq=%lu]  disp=[baro=%u pot1=%u pot2=%u batt=%u ultra=%u]  imu=[r=%.1f p=%.1f y=%.1f]\n",
+    Serial.printf("[logger] %s  sd=%s  cycle=%s  src=%s  air=[spd=%.1f pmin=%u pmax=%u as1=%u as2=%u batt=%u]  wind=[pulse=%u seq=%lu]  wind2=[pulse=%u]  disp=[baro=%u pot1=%u pot2=%u batt=%u ultra=%u]  imu=[r=%.1f p=%.1f y=%.1f]\n",
       ts,
       g_sdReady ? "OK" : "ERR",
       g_lastCycleOk ? "OK" : "ERR",
       usingFallback ? "ESPNOW" : "RS485",
       g_airDataBuffer[0] / 10.0f, g_airEspNowLatest.pulseCountMin, g_airEspNowLatest.pulseCountMax,
       g_airDataBuffer[1], g_airDataBuffer[2], g_airDataBuffer[3],
-      g_windEspNowLatest.windSpeed / 10.0f, static_cast<unsigned long>(g_windEspNowLatest.sequenceNumber),
+      g_windEspNowLatest.windSpeed, static_cast<unsigned long>(g_windEspNowLatest.sequenceNumber),
+      g_wind2EspNowLatest.windSpeed,
       g_displayBuffer[0], g_displayBuffer[1], g_displayBuffer[2], g_displayBuffer[3], g_displayBuffer[4],
       g_imuData.roll, g_imuData.pitch, g_imuData.yaw);
   }
